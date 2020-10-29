@@ -463,7 +463,7 @@ case "$TMUX_BIN_KERNEL" in
       -e TMUX_BIN_KERNEL="$TMUX_BIN_KERNEL" \
       -e TMUX_BIN_ARCH="$TMUX_BIN_ARCH"     \
       -e TMUX_BIN_CPU="$TMUX_BIN_CPU"       \
-      -v "$dir"  :/out                      \
+      -v "$dir":/out                        \
       -w /out                               \
       --rm                                  \
       -- "$image" /bin/sh -uexc "$build"
