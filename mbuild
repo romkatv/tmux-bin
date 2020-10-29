@@ -1,0 +1,241 @@
+#!/usr/bin/env zsh
+#
+# Usage: mbuild [-b git-ref] [kernel-arch]...
+#
+# Builds a bunch of tmux-*.tar.gz archives. Without arguments builds
+# archives for all platforms. git-ref defaults to master.
+#
+# Before using this script you need to set up build servers and list them
+# in ~/.ssh/config. There should be a Host entry for every value of `assets`
+# association defined below. VMs and cloud instances work as well as physical
+# machines, including localhost. As long as the machine has been set up as
+# described below and you can SSH to it without password, it should work.
+#
+#                    ===[ Build Server Setup ]===
+#
+#                              Linux
+#
+# - Install docker.
+#   $ apt install docker.io     # adjust appropriately if there is no `apt`
+#   $ usermod -aG docker $USER  # not needed if going to build as root
+# - Install git.
+#   $ apt install git           # adjust appropriately if there is no `apt`
+#
+#                              macOS
+#
+# - Install compiler tools:
+#   $ xcode-select --install
+# - Install homebrew: https://brew.sh/.
+#   $ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install.sh)"
+#
+#                             FreeBSD
+#
+# - Install git.
+#   $ pkg install git
+
+'emulate' '-L' 'zsh' '-o' 'no_aliases' '-o' 'err_return'
+setopt no_unset extended_glob pipe_fail prompt_percent typeset_silent \
+  no_prompt_subst no_prompt_bang pushd_silent warn_create_global
+
+autoload -Uz is-at-least
+
+if ! is-at-least 5.1 || [[ $ZSH_VERSION == 5.4.* ]]; then
+  print -ru2 -- "[error] unsupported zsh version: $ZSH_VERSION"
+  return 1
+fi
+
+zmodload zsh/system
+
+local -r git_url='https://github.com/romkatv/tmux-bin.git'
+
+local -rA assets=(
+  # target kernel-arch   hostname of the build machine
+  darwin-x86_64          build-macos-x86_64
+  freebsd-amd64          build-freebsd-amd64
+  linux-aarch64          build-linux-aarch64
+  linux-armv6l           build-linux-armv7l
+  linux-armv7l           build-linux-armv7l
+  linux-x86_64           build-linux-x86_64
+)
+
+local -rA protocol=(
+  'darwin-*'         unix
+  'freebsd-*'        unix
+  'linux-*'          unix
+)
+
+local -r rootdir=${ZSH_SCRIPT:h}
+local -r logs=$rootdir/logs
+local -r locks=$rootdir/locks
+local -r archives=$rootdir/archives
+
+function usage() {
+  print -r -- 'usage: mbuild [-b REF] [KERNEL-ARCH]...'
+}
+
+local OPTARG opt git_ref=master
+local -i OPTIND
+while getopts ":b:h" opt; do
+  case $opt in
+    h) usage; return 0;;
+    b) [[ -n $OPTARG ]]; git_ref=$OPTARG;;
+    \?) print -ru2 -- "mbuild: invalid option: -$OPTARG"           ; return 1;;
+    :)  print -ru2 -- "mbuild: missing required argument: -$OPTARG"; return 1;;
+    *)  print -ru2 -- "mbuild: invalid option: -$opt"              ; return 1;;
+  esac
+done
+
+shift $((OPTIND - 1))
+
+(( $# )) || set -- ${(ko)assets}
+set -- ${(u)@}
+
+local platform
+for platform; do
+  if (( ! $+assets[$platform] )); then
+    print -ru2 -- "mbuild: invalid platform: $platform"
+    return 1
+  fi
+done
+
+local build='
+  rm -rf tmux-bin
+  git clone --recursive --shallow-submodules --depth=1 -b '$git_ref' '$git_url'
+  cd tmux-bin
+  if command -v zsh >/dev/null 2>&1; then
+    sh=zsh
+  elif command -v dash >/dev/null 2>&1; then
+    sh=dash
+  elif command -v ash >/dev/null 2>&1; then
+    sh=ash
+  else
+    sh=sh
+  fi
+  $sh -x ./build -m '
+
+function build-unix() {
+  local intro
+  case $2 in
+    darwin-*) intro='PATH="/usr/local/bin:$PATH"';;
+  esac
+  ssh $1 -- /bin/sh -uex <<<"
+    $intro
+    cd /tmp
+    $build ${2##*-}"
+  scp $1:/tmp/tmux-bin/tmux-$2.tar.gz $archives/
+}
+
+function build() (
+  setopt xtrace
+  local platform=$1
+  local machine=$assets[$platform]
+  print -n >>$locks/$machine
+  zsystem flock $locks/$machine
+  build-${protocol[(k)$platform]} $machine $platform
+)
+
+function mbuild() {
+  local platform pid pids=()
+  for platform; do
+    build $platform &>$logs/$platform &
+    print -r -- "starting build for $platform on $assets[$platform] (pid $!)"
+    pids+=($platform $!)
+  done
+  local failed=()
+  for platform pid in $pids; do
+    print -rn -- "$platform => "
+    if wait $pid; then
+      print -r -- "ok"
+    else
+      print -r -- "error"
+      failed+=$platform
+    fi
+  done
+  (( $#failed )) || return 0
+  print
+  print -r -- "Error logs:"
+  print
+  for platform in $failed; do
+    print -r -- "  $platform => $logs/$platform"
+  done
+  return 1
+}
+
+# Copied from https://github.com/romkatv/run-process-tree.
+function run-process-tree() {
+  zmodload zsh/parameter zsh/param/private || return
+  local -P opt=(${(kv)options[@]})         || return
+  local -P pat=(${patchars[@]})            || return
+  local -P dis_pat=(${dis_patchars[@]})    || return
+  emulate -L zsh -o err_return             || return
+  setopt monitor traps_async pipe_fail no_unset
+  zmodload zsh/system
+
+  if (( $# == 0 )); then
+    print -ru2 -- 'usage: run-process-tree command [arg]...'
+    return 1
+  fi
+
+  local -P stdout REPLY
+  exec {stdout}>&1
+  {
+    {
+      local -Pi pipe
+      local -P gid=$sysparams[pid]
+      local -P sig=(ABRT EXIT HUP ILL INT PIPE QUIT TERM ZERR)
+      local -P trap=(trap "trap - $sig; kill -- -$sysparams[pid]" $sig)
+
+      exec {pipe}>&1 1>&$stdout
+      $trap
+
+      {
+        $trap
+        while sleep 1 && print -u $pipe .; do; done
+      } 2>/dev/null &
+      local -Pi watchdog=$!
+
+      {
+        trap - ZERR
+        exec {pipe}>&-
+        enable -p -- $pat
+        disable -p -- $dis_pat
+        options=($opt zle off monitor off)
+        "$@"
+      } &
+      local -Pi ret
+      wait $! || ret=$?
+
+      trap "exit $ret" TERM
+      kill $watchdog
+      wait $watchdog
+      return ret
+    } | while read; do; done || return
+  } always {
+    exec {stdout}>&-
+  }
+}
+
+function list() {
+  local files=(${(o)@})
+
+  local file
+  local -i max_len
+  for file in ${(@)files:t}; do
+    (( $#file <= max_len )) || max_len=$#file
+  done
+
+  (( ++max_len ))
+
+  local sha256 md5
+  for file in $files; do
+    sha256="${$(shasum -b -a 256 -- $file)%% *}"
+    md5="${$(md5sum -b -- $file)%% *}"
+    printf "file:%-${max_len}s md5:%s sha256:%s\n" "${file:t};" "$md5;" "$sha256;"
+  done
+}
+
+mkdir -p -- $logs $locks $archives
+rm -f -- $archives/tmux-${^@}.tar.gz
+run-process-tree mbuild $@
+print -r -- "---------------------"
+list $archives/tmux-*.tar.gz

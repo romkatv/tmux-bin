@@ -1,0 +1,478 @@
+#!/bin/sh
+#
+# Type `build -h` for usage and see https://github.com/romkatv/tmux-bin
+# for documentation.
+
+set -ue
+
+if [ -n "${BASH_VERSION:-}" ]; then
+  if [ -z "${BASH_VERSION##[0-4].*}" ]; then
+    >&2 echo "[error] bash version < 5 is not supported; try another interpreter"
+    exit 1
+  fi
+fi
+
+if [ -n "${ZSH_VERSION:-}" ]; then
+  emulate sh -o err_exit -o no_unset
+fi
+
+usage="$(cat <<\END
+Usage: build [-m ARCH] [-c CPU] [-i IMAGE] [-d CMD]
+
+Creates an archive containing statically-linked, hermetic,
+patched tmux. Installation of the patched tmux from the
+archive does not require libc, terminfo, ncurses or root
+access. As long as the target machine has a compatible CPU
+and kernel, it will work.
+
+Options:
+
+  -m ARCH   `uname -m` from the target machine; defaults to `uname -m`
+            from the local machine
+  -c CPU    generate machine instructions for CPU of this type; this
+            value gets passed as `-march` (or `-mcpu` for ppc64le) to gcc;
+            inferred from ARCH if not set explicitly
+  -i IMAGE  docker image used for building zsh; inferred from ARCH
+            if not set explicitly
+  -d CMD    use this command instead of 'docker'; it must understand
+            the same command line arguments
+END
+)"
+
+build="$(cat <<\END
+outdir="$(pwd)"
+
+if command -v mktemp >/dev/null 2>&1; then
+  workdir="$(mktemp -d "${TMPDIR:-/tmp}"/tmux-bin.XXXXXXXXXX)"
+else
+  workdir="${TMPDIR:-/tmp}/tmux-bin.$$"
+  mkdir -- "$workdir"
+fi
+
+cd -- "$workdir"
+workdir="$(pwd)"
+
+narg() { echo $#; }
+
+if [ "$(narg $workdir)" != 1 -o -z "${workdir##*:*}" ]; then
+  >&2 echo "[error] cannot build in this directory: $workdir"
+  exit 1
+fi
+
+cleanup() {
+  trap - INT QUIT TERM EXIT ILL PIPE
+  cd /
+  if ! rm -rf -- "$workdir"; then
+    sleep 5
+    rm -rf -- "$workdir"
+  fi
+}
+trap cleanup INT QUIT TERM EXIT ILL PIPE
+
+ncurses_version=6.2
+kitty_version=0.17.4
+termite_version=15
+tmux_version=1.0.0
+
+ncurses_url=https://ftp.gnu.org/pub/gnu/ncurses/ncurses-$ncurses_version.tar.gz
+kitty_url=https://raw.githubusercontent.com/kovidgoyal/kitty/v$kitty_version/terminfo/kitty.terminfo
+termite_url=https://raw.githubusercontent.com/thestinger/termite/v$termite_version/termite.terminfo
+tmux_url=https://github.com/romkatv/tmux/archive/v$tmux_version.tar.gz
+
+ncurses_sha256=30306e0c76e0f9f1f0de987cf1c82a5c21e1ce6568b9227f7da5b71cbea86c9d
+kitty_sha256=26c89a6d915864eb1dec8f59e4aadffda85ab8bfd6074a0a25812d864b3c9a2c
+termite_sha256=771ecbde374ccefc40f06fb8ee0191bac1a81ab1f8f46b88288d1a9092770529
+tmux_sha256=284339f9e046b851b9bd03d465a2d7d27e70697a7c5d07d2ddc3dca8d40ae786
+
+cpus="$(getconf _NPROCESSORS_ONLN)" || cpus="$(sysctl -n hw.ncpu)" || cpus=8
+
+fetch() {
+  local url="$1"
+  local sha256="$2"
+  local filename="${url##*/}"
+  local base="${filename%.tar.gz}"
+  printf '%s  %s\n' "$sha256" "$filename" >"$base".sha256
+  if ! cp -- "$outdir/src/$filename" . 2>/dev/null || ! shasum -b -a 256 -c "$base".sha256; then
+    rm -f -- "$filename"
+    wget -- "$url"
+    shasum -b -a 256 -c "$base".sha256
+    mkdir -p -- "$outdir"/src
+    cp -f -- "$filename" "$outdir"/src/tmp."$filename"
+    mv -f -- "$outdir"/src/tmp."$filename" "$outdir"/src/"$filename"
+  fi
+  case "$filename" in
+    *.tar.gz)
+      tar -xzf "$filename"
+    ;;
+  esac
+}
+
+ncurses_configure=
+
+case "$TMUX_BIN_KERNEL" in
+  linux)
+    apk update
+    apk add          \
+      autoconf       \
+      bash           \
+      binutils       \
+      file           \
+      gcc            \
+      make           \
+      man            \
+      musl-dev       \
+      perl-utils     \
+      rsync          \
+      tar            \
+      util-linux     \
+      automake       \
+      libevent-dev   \
+      bison          \
+      libressl-dev
+  ;;
+  freebsd)
+    pkg install -y \
+      autoconf     \
+      binutils     \
+      gcc          \
+      gmake        \
+      perl5        \
+      rsync        \
+      automake     \
+      libevent     \
+      bison
+  ;;
+  darwin)
+    if ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
+      >&2 echo "[error] please run 'xcode-select --install' and retry"
+      exit 1
+    fi
+    if ! command -v brew >/dev/null 2>&1; then
+      >&2 echo "[error] please install homebrew from https://brew.sh/ and retry"
+      exit 1
+    fi
+    for formula in autoconf automake wget libevent bison pkg-config; do
+      if brew list "$formula" &>/dev/null; then
+        brew upgrade "$formula"
+      else
+        brew install "$formula"
+      fi
+    done
+  ;;
+  *)
+    >&2 echo "[internal error] unhandled kernel: $TMUX_BIN_KERNEL"
+    exit 1
+  ;;
+esac
+
+cd -- "$workdir"
+fetch "$ncurses_url" "$ncurses_sha256"
+cd ncurses-"$ncurses_version"
+mkdir fake-bin
+echo 'false' >fake-bin/ldconfig
+chmod +x fake-bin/ldconfig
+fake_bin_dir="$(pwd)"/fake-bin
+PATH="$fake_bin_dir:$PATH" ./configure \
+  --prefix "$workdir"/ncurses \
+  --disable-pc-files \
+  --disable-mixed-case \
+  --disable-rpath \
+  --disable-bsdpad \
+  --disable-termcap \
+  --disable-rpath-hack \
+  --enable-root-environ \
+  --without-ada \
+  --without-manpages \
+  --without-tack \
+  --without-tests \
+  --without-pc-suffix \
+  --without-pkg-config-libdir \
+  --without-shared \
+  --without-debug \
+  --without-cxx-shared \
+  --without-gmp \
+  --without-dlsym \
+  --without-pcre2 \
+  --with-terminfo-dirs="/etc/terminfo:/usr/share/terminfo:/lib/terminfo:/usr/lib/terminfo" \
+  $ncurses_configure
+
+if command -v gmake >/dev/null 2>/dev/null; then
+  gmake -j "$cpus" install
+else
+  make -j "$cpus" install
+fi
+
+cd -- "$workdir"
+fetch "$kitty_url" "$kitty_sha256"
+ncurses/bin/tic -x -o ncurses/share/terminfo kitty.terminfo
+cd -- "$workdir"
+fetch "$termite_url" "$termite_sha256"
+ncurses/bin/tic -x -o ncurses/share/terminfo termite.terminfo
+
+cd -- "$workdir"
+fetch "$tmux_url" "$tmux_sha256"
+cd "tmux-$tmux_version"
+
+case "$TMUX_BIN_CPU" in
+  powerpc64le) archflag="-mcpu";;
+  *)           archflag="-march";;
+esac
+
+name=tmux-"$TMUX_BIN_KERNEL"-"$TMUX_BIN_ARCH"
+
+export CFLAGS="-Wall -Wmissing-prototypes $archflag=$TMUX_BIN_CPU -DNDEBUG -O2 -flto -fno-strict-aliasing"
+export LDFLAGS=
+export EXELDFLAGS=
+export LIBS=
+
+CFLAGS="$CFLAGS -I$workdir/ncurses/include -I$workdir/ncurses/include/ncurses"
+LDFLAGS="$LDFLAGS -L$workdir/ncurses/lib"
+
+tmux_configure_flags=
+
+case "$TMUX_BIN_KERNEL" in
+  linux|freebsd)
+    EXELDFLAGS="$EXELDFLAGS -static"
+    tmux_configure_flags="$tmux_configure_flags --enable-static"
+  ;;
+  darwin)
+    opt=/usr/local/opt
+    mkdir -- "$workdir"/lib
+    ln -s -- "$opt"/libevent/lib/libevent.a "$workdir"/lib
+    CFLAGS="$CFLAGS -I$opt/libevent/include"
+    LDFLAGS="$LDFLAGS -L$workdir/lib"
+  ;;
+  *)
+    >&2 echo "[internal error] unhandled kernel: $TMUX_BIN_KERNEL"
+    exit 1
+  ;;
+esac
+
+export DLLDFLAGS="-shared"
+export LDFLAGS="$CFLAGS $LDFLAGS"
+
+sh ./autogen.sh
+./configure                                  \
+  --prefix="$workdir/$name"                  \
+  --exec-prefix="$workdir/$name"             \
+  --host="$TMUX_BIN_ARCH"-"$TMUX_BIN_KERNEL" \
+  $tmux_configure_flags                      \
+
+make -j "$cpus" install
+
+rsync -a --copy-links --copy-dirlinks -- "$workdir/$name"/ "$workdir/$name".tmp/
+rm -r -- "$workdir/$name"
+mv -- "$workdir/$name".tmp "$workdir/$name"
+
+cd -- "$workdir/$name"
+
+strip bin/tmux
+
+rsync -a --copy-links --copy-dirlinks -- "$workdir"/ncurses/share/terminfo share/
+
+for dir in share/terminfo/*; do
+  mv -- "$dir" "$dir".tmux-bin
+done
+
+cp -r -- share/man ./
+
+tar -pczf "$outdir"/tmp."$name".tar.gz *
+mv -f -- "$outdir"/tmp."$name".tar.gz "$outdir"/"$name".tar.gz
+
+cleanup
+
+cat >&2 <<-END
+	-------------------------------------------------
+	SUCCESS: created ./$name.tar.gz.
+
+	This archive contains statically-linked, hermetic,
+	patched tmux. Installation of the patched tmux from the
+	archive does not require libc, terminfo, ncurses or root
+	access. As long as the target machine has a compatible
+	CPU and	kernel, it will work.
+
+	To install the patched tmux from the archive, copy it
+	along with 'install' script to the home directory on the
+	target machine and run:
+
+	  sh ~/install -f ~/$name.tar.gz
+
+	END
+END
+)"
+
+image=
+docker=
+
+TMUX_BIN_ARCH=
+TMUX_BIN_CPU=
+
+while getopts ':m:c:i:d:h' opt "$@"; do
+  case "$opt" in
+    h)
+      printf '%s\n' "$usage"
+      exit
+    ;;
+    m)
+      if [ -n "$TMUX_BIN_ARCH" ]; then
+        >&2 echo "[error] duplicate option: -$opt"
+        exit 1
+      fi
+      if [ -z "$OPTARG" ]; then
+        >&2 echo "[error] incorrect value of -$opt: $OPTARG"
+        exit 1
+      fi
+      TMUX_BIN_ARCH="$OPTARG"
+    ;;
+    c)
+      if [ -n "$TMUX_BIN_CPU" ]; then
+        >&2 echo "[error] duplicate option: -$opt"
+        exit 1
+      fi
+      if [ -z "$OPTARG" ]; then
+        >&2 echo "[error] incorrect value of -$opt: $OPTARG"
+        exit 1
+      fi
+      TMUX_BIN_CPU="$OPTARG"
+    ;;
+    i)
+      if [ -n "$image" ]; then
+        >&2 echo "[error] duplicate option: -$opt"
+        exit 1
+      fi
+      if [ -z "$OPTARG" ]; then
+        >&2 echo "[error] incorrect value of -$opt: $OPTARG"
+        exit 1
+      fi
+      image="$OPTARG"
+    ;;
+    d)
+      if [ -n "$docker" ]; then
+        >&2 echo "[error] duplicate option: -$opt"
+        exit 1
+      fi
+      if [ -z "$OPTARG" ]; then
+        >&2 echo "[error] incorrect value of -$opt: $OPTARG"
+        exit 1
+      fi
+      docker="$OPTARG"
+    ;;
+    \?) >&2 echo "[error] invalid option: -$OPTARG"           ; exit 1;;
+    :)  >&2 echo "[error] missing required argument: -$OPTARG"; exit 1;;
+    *)  >&2 echo "[internal error] unhandled option: -$opt"   ; exit 1;;
+  esac
+done
+
+if [ "$OPTIND" -le $# ]; then
+  >&2 echo "[error] unexpected positional argument"
+  exit 1
+fi
+
+if [ -z "$TMUX_BIN_ARCH" ]; then
+  TMUX_BIN_ARCH="$(uname -m)"
+  TMUX_BIN_ARCH="$(printf '%s' "$TMUX_BIN_ARCH" | tr '[A-Z]' '[a-z]')"
+fi
+
+if [ -z "$TMUX_BIN_CPU" ]; then
+  case "$TMUX_BIN_ARCH" in
+    armv6l)         TMUX_BIN_CPU=armv6;;
+    armv7l)         TMUX_BIN_CPU=armv7;;
+    aarch64)        TMUX_BIN_CPU=armv8-a;;
+    ppc64le)        TMUX_BIN_CPU=powerpc64le;;
+    x86_64|amd64)   TMUX_BIN_CPU=x86-64;;
+    i386|i586|i686) TMUX_BIN_CPU="$TMUX_BIN_ARCH";;
+    *)
+      >&2 echo '[error] unable to infer target CPU architecture'
+      >&2 echo 'Please specify explicitly with `-c CPU`.'
+      exit 1
+    ;;
+  esac
+fi
+
+TMUX_BIN_KERNEL="$(uname -s)"
+TMUX_BIN_KERNEL="$(printf '%s' "$TMUX_BIN_KERNEL" | tr '[A-Z]' '[a-z]')"
+
+case "$TMUX_BIN_KERNEL" in
+  linux)
+    if [ -z "$image" ]; then
+      case "$TMUX_BIN_ARCH" in
+        x86_64)         image=alpine:3.9.5;;
+        i386|i586|i686) image=i386/alpine:3.9.5;;
+        armv6l)         image=arm32v6/alpine:3.9.5;;
+        armv7l)         image=arm32v7/alpine:3.9.5;;
+        aarch64)        image=arm64v8/alpine:3.9.5;;
+        ppc64le)        image=ppc64le/alpine:3.9.5;;
+        *)
+          >&2 echo '[error] unable to infer docker image'
+          >&2 echo 'Please specify explicitly with `-i IMAGE`.'
+          exit 1
+        ;;
+      esac
+    fi
+    : "${docker:=docker}"
+    if [ -z "${docker##*/*}" ]; then
+      if [ ! -x "$docker" ]; then
+        >&2 echo "[error] not an executable file: $docker"
+        exit 1
+      fi
+    else
+      if ! command -v "$docker" >/dev/null 2>&1; then
+        >&2 echo "[error] command not found: $docker"
+        exit 1
+      fi
+    fi
+  ;;
+  freebsd)
+    if [ -n "$image" ]; then
+      >&2 echo '[error] docker image (-i) is not supported on freebsd'
+      exit 1
+    fi
+    if [ -n "$docker" ]; then
+      >&2 echo '[error] docker (-d) is not supported on freebsd'
+      exit 1
+    fi
+  ;;
+  darwin)
+    if [ -n "$image" ]; then
+      >&2 echo '[error] docker image (-i) is not supported on macOS'
+      exit 1
+    fi
+    if [ -n "$docker" ]; then
+      >&2 echo '[error] docker (-d) is not supported on macOS'
+      exit 1
+    fi
+  ;;
+  *)
+    >&2 echo '[error] unsupported kernel, sorry!'
+    exit 1
+  ;;
+esac
+
+>&2 echo "Building zsh..."
+>&2 echo ""
+[ -z "$docker" ] || >&2 echo "  DOCKER=$docker"
+[ -z "$image"  ] || >&2 echo "  IMAGE=$image"
+>&2 echo "  KERNEL=$TMUX_BIN_KERNEL"
+>&2 echo "  ARCH=$TMUX_BIN_ARCH"
+>&2 echo "  CPU=$TMUX_BIN_CPU"
+
+case "$TMUX_BIN_KERNEL" in
+  linux)
+    dir="$(pwd)"
+    "$docker" run                           \
+      -e TMUX_BIN_KERNEL="$TMUX_BIN_KERNEL" \
+      -e TMUX_BIN_ARCH="$TMUX_BIN_ARCH"     \
+      -e TMUX_BIN_CPU="$TMUX_BIN_CPU"       \
+      -v "$dir"  :/out                      \
+      -w /out                               \
+      --rm                                  \
+      -- "$image" /bin/sh -uexc "$build"
+  ;;
+  freebsd|darwin)
+    eval "$build"
+  ;;
+  *)
+    >&2 echo "[internal error] unhandled kernel: $TMUX_BIN_KERNEL";
+    exit 1
+  ;;
+esac

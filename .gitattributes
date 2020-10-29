@@ -1,0 +1,4 @@
+* text=auto
+/build text eol=lf
+/install text eol=lf
+/mbuild text eol=lf
