@@ -57,7 +57,7 @@ local -rA protocol=(
   'linux-*'          unix
 )
 
-local -r rootdir=${ZSH_SCRIPT:h}
+local -r rootdir=${ZSH_SCRIPT:A:h}
 local -r logs=$rootdir/logs
 local -r locks=$rootdir/locks
 local -r archives=$rootdir/archives
@@ -115,7 +115,20 @@ function build-unix() {
     $intro
     cd /tmp
     $build ${2##*-}"
-  scp $1:/tmp/tmux-bin/tmux-$2.tar.gz $archives/
+  local tmp
+  {
+    tmp=$(mktemp -d)
+    scp $1:/tmp/tmux-bin/tmux-$2.tar.gz $tmp/
+    (
+      cd -q -- $tmp
+      tar -xzf tmux-$2.tar.gz
+      rm tmux-$2.tar.gz
+      tar --owner=0 --group=0 -I 'gzip -9' -cf $archives/tmux-$2.tmp.$$.tar.gz -- *
+      mv -f -- $archives/tmux-$2.tmp.$$.tar.gz $archives/tmux-$2.tar.gz
+    )
+  } always {
+    rm -rf -- "$tmp"
+  }
 }
 
 function build() (
