@@ -113,7 +113,8 @@ local build='
 function build-unix() {
   local intro
   case $2 in
-    darwin-*) intro='PATH="/usr/local/bin:$PATH"';;
+    darwin-arm64) intro='PATH="/opt/local/bin:$PATH"';;
+    darwin-*)     intro='PATH="/usr/local/bin:$PATH"';;
   esac
   ssh $1 -- /bin/sh -uex <<<"
     $intro
