@@ -221,15 +221,15 @@ case "$TMUX_BIN_KERNEL" in
     if [ -e /opt/local/lib/libevent.a ]; then
       ln -s -- /opt/local/lib/libevent.a "$workdir"/lib
       CFLAGS="$CFLAGS -I/opt/local/include"
-      LDFLAGS="$LDFLAGS -L/opt/local/lib"
       # TODO: use utf8proc.
     else
-      opt=/usr/local/opt
+      brew_prefix="$(command brew --prefix)"
+      opt="$brew_prefix"/opt
       ln -s -- "$opt"/libevent/lib/libevent.a "$opt"/utf8proc/lib/libutf8proc.a "$workdir"/lib
       CFLAGS="$CFLAGS -I$opt/libevent/include -I$opt/utf8proc/include"
-      LDFLAGS="$LDFLAGS -L$workdir/lib"
       tmux_configure_flags="$tmux_configure_flags --enable-utf8proc"
     fi
+    LDFLAGS="$LDFLAGS -L$workdir/lib"
   ;;
   *)
     >&2 echo "[internal error] unhandled kernel: $TMUX_BIN_KERNEL"
