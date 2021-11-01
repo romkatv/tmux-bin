@@ -137,7 +137,8 @@ case "$TMUX_BIN_KERNEL" in
     elif command -v brew >/dev/null 2>&1; then
       for formula in autoconf automake wget libevent bison pkg-config utf8proc; do
         if brew ls --version "$formula" >/dev/null; then
-          brew upgrade "$formula"
+          # TODO: enable this.
+          : brew upgrade "$formula"
         else
           brew install "$formula"
         fi
