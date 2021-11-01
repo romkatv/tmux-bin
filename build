@@ -222,6 +222,7 @@ case "$TMUX_BIN_KERNEL" in
       ln -s -- /opt/local/lib/libevent.a "$workdir"/lib
       CFLAGS="$CFLAGS -I/opt/local/include"
       # TODO: use utf8proc.
+      tmux_configure_flags="$tmux_configure_flags --disable-utf8proc"
     else
       brew_prefix="$(command brew --prefix)"
       opt="$brew_prefix"/opt
