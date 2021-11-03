@@ -73,13 +73,13 @@ ncurses_version=6.2
 kitty_version=0.17.4
 termite_version=15
 kakoune_version=2020.09.01
-tmux_version=3.3-rc-72-gc7690434-z4h
+tmux_version=3.3-rc-79-g2823c859-z4h
 
 ncurses_url=https://ftp.gnu.org/pub/gnu/ncurses/ncurses-$ncurses_version.tar.gz
 tmux_url=https://github.com/romkatv/tmux/archive/$tmux_version.tar.gz
 
 ncurses_sha256=30306e0c76e0f9f1f0de987cf1c82a5c21e1ce6568b9227f7da5b71cbea86c9d
-tmux_sha256=bd0bc3d1962642ce468e69a625828ff26088bbccf1f1e8a9d5908f2d49b785a9
+tmux_sha256=ee6af12022f73d813f83451955aaa90bc8c7d0bd6d2e8244d1121d8e0b35a4fe
 
 cpus="$(getconf _NPROCESSORS_ONLN)" || cpus="$(sysctl -n hw.ncpu)" || cpus=8
 
