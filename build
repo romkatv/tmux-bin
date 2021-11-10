@@ -132,9 +132,7 @@ case "$TMUX_BIN_KERNEL" in
       >&2 echo "[error] please run 'xcode-select --install' and retry"
       exit 1
     fi
-    if command -v port >/dev/null 2>&1; then
-      sudo port -N install autoconf automake wget libevent bison
-    elif command -v brew >/dev/null 2>&1; then
+    if command -v brew >/dev/null 2>&1; then
       for formula in autoconf automake wget libevent bison pkg-config utf8proc; do
         if brew ls --version "$formula" >/dev/null; then
           # TODO: enable this.
@@ -143,6 +141,8 @@ case "$TMUX_BIN_KERNEL" in
           brew install "$formula"
         fi
       done
+    elif command -v port >/dev/null 2>&1; then
+      sudo port -N install autoconf automake wget libevent bison
     else
       >&2 echo "[error] please install MacPorts or Homebrew and retry"
       exit 1
@@ -219,17 +219,17 @@ case "$TMUX_BIN_KERNEL" in
   ;;
   darwin)
     mkdir -- "$workdir"/lib
-    if [ -e /opt/local/lib/libevent.a ]; then
-      ln -s -- /opt/local/lib/libevent.a "$workdir"/lib
+    if command -v brew >/dev/null 2>&1; then
+      brew_prefix="$(command brew --prefix)"
+      opt="$brew_prefix"/opt
+      ln -s -- "$opt"/libevent/lib/lib*.a "$opt"/utf8proc/lib/lib*.a "$workdir"/lib/
+      CFLAGS="$CFLAGS -I$opt/libevent/include -I$opt/utf8proc/include"
+      tmux_configure_flags="$tmux_configure_flags --enable-utf8proc"
+    else
+      ln -s -- /opt/local/lib/libevent*.a "$workdir"/lib/
       CFLAGS="$CFLAGS -I/opt/local/include"
       # TODO: use utf8proc.
       tmux_configure_flags="$tmux_configure_flags --disable-utf8proc"
-    else
-      brew_prefix="$(command brew --prefix)"
-      opt="$brew_prefix"/opt
-      ln -s -- "$opt"/libevent/lib/libevent.a "$opt"/utf8proc/lib/libutf8proc.a "$workdir"/lib
-      CFLAGS="$CFLAGS -I$opt/libevent/include -I$opt/utf8proc/include"
-      tmux_configure_flags="$tmux_configure_flags --enable-utf8proc"
     fi
     LDFLAGS="$LDFLAGS -L$workdir/lib"
   ;;
